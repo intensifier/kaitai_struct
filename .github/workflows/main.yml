@@ -1,0 +1,92 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - master
+  pull_request: {}
+
+# Cancel in-progress runs of the same workflow
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  ksc:
+    environment: unstable
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          submodules: recursive
+      - uses: actions/setup-java@03ad4de0992f5dab5e18fcb136590ce7c4a0ac95 # v5.6.0
+        with:
+          distribution: temurin
+          java-version: '25'
+      - uses: sbt/setup-sbt@508b753e53cb6095967669e0911487d2b9bc9f41 # v1.1.22
+      - name: build-compiler
+        run: |
+          cd compiler
+          . ./setup_env.sh
+
+          cat /dev/null | sbt \
+            compile \
+            compilerJVM/stage \
+            fastOptJS \
+            buildNpmJsFile \
+            buildNpmPackage \
+            compilerJVM/debian:packageBin \
+            compilerJVM/universal:packageBin
+
+      # TODO: add compilerJVM/rpm:packageBin
+
+      - name: publish ksc to artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: kaitai-struct-compiler
+          path: |
+            compiler/js/target/scala-*/kaitai-struct-compiler-fastopt.js
+            compiler/js/npm
+            compiler/jvm/target/kaitai-struct-compiler_*_all.deb
+            compiler/jvm/target/universal/kaitai-struct-compiler-*.zip
+
+      # TODO: add compiler/jvm/target/rpm/RPMS/noarch/kaitai-struct-compiler-*.noarch.rpm
+
+      - name: publish deb to repo
+        uses: kaitai-io/repo-apt-handle@v0.1 # zizmor: ignore[unpinned-uses]
+        with:
+          az_storage_sas_token: ${{ secrets.AZURE_STORAGE_SAS_TOKEN }}
+          az_storage_account: packageskaitai
+          az_storage_container: unstable
+          packages: compiler/jvm/target/kaitai-struct-compiler_*_all.deb
+          gpg_priv_key: ${{ secrets.GPG_PRIV_KEY }}
+          gpg_passphrase: ${{ secrets.GPG_PASSPHRASE }}
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        continue-on-error: true
+
+      - name: build-formats
+        run: |
+          cd tests
+          ./build-formats
+
+      - name: publish formats to ci_targets
+        env:
+          BOT_SSH_KEY: ${{secrets.BOT_SSH_KEY}}
+        run: |
+          cd tests
+          ./push_artifacts/git_config_kaitai_bot
+          ./push_artifacts/publish \
+            -o kaitai-io \
+            -r ci_targets \
+            -m "Regen ${GITHUB_REF#refs/heads/*} kaitai-io/kaitai_struct@$GITHUB_SHA" \
+            -- \
+            --exclude=.git \
+            --exclude=.github \
+            --exclude=.travis.yml \
+            compiled
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
